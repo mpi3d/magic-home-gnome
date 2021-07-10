@@ -20,7 +20,7 @@ gsettings set org.gnome.shell introspect true
 
 ## Usage
 
-```
+```sh
 cd magic-home-gnome
 chmod +x magic-home-gnome
 ./magic-home-gnome
