@@ -1,0 +1,271 @@
+#!/usr/bin/python
+
+from sys import exit as sys_exit
+
+from flux_led import BulbScanner, WifiLedBulb
+from gi import require_version
+
+require_version('GdkPixbuf', '2.0')
+require_version('Gtk', '3.0')
+
+from gi.repository import Gio, GLib, Gtk
+
+APP_COLOR_MAX = 100
+APP_COLOR_ICON_SIZE = 64
+APP_COLOR_NONE = (0, 0, 0)
+
+
+class WifiLedBulbs:
+
+    def __init__(self, timeout=1, retry=5):
+        self.bulbs = []
+
+        for _ in range(retry):
+            scanner = BulbScanner()
+            scanner.scan(timeout)
+
+            for bulb in scanner.found_bulbs:
+                bulb = WifiLedBulb(bulb["ipaddr"])
+                _, _, _, warm_white, cold_white = bulb.getRgbww()
+                if not warm_white and not cold_white:
+                    self.bulbs.append(bulb)
+
+            if self.bulbs:
+                break
+
+        if not self.bulbs:
+            raise ValueError("No bulb found")
+
+        self.current_color = None
+
+    def turn_on(self):
+        for bulb in self.bulbs:
+            bulb.turnOn()
+
+    def turn_off(self):
+        for bulb in self.bulbs:
+            bulb.turnOff()
+
+    def set_color(self, red, gree, blue):
+        if (red, gree, blue) != self.current_color:
+            for bulb in self.bulbs:
+                bulb.setRgb(red, gree, blue, False)
+
+            self.current_color = (red, gree, blue)
+
+    def close(self):
+        for bulb in self.bulbs:
+            bulb.close()
+
+
+def hsb_to_rgb(hue, saturation, brightness):
+
+    c = brightness * saturation
+    hue_6 = hue * 6
+    x = c * (1 - abs(hue_6 % 2 - 1))
+    maximum = brightness - c
+
+    if hue_6 <= 1:
+        red = c + maximum
+        green = x + maximum
+        blue = maximum
+    elif hue_6 <= 2:
+        red = x + maximum
+        green = c + maximum
+        blue = maximum
+    elif hue_6 <= 3:
+        red = maximum
+        green = c + maximum
+        blue = x + maximum
+    elif hue_6 <= 4:
+        red = maximum
+        green = x + maximum
+        blue = c + maximum
+    elif hue_6 <= 5:
+        red = x + maximum
+        green = maximum
+        blue = c + maximum
+    else:
+        red = c + maximum
+        green = maximum
+        blue = x + maximum
+
+    return (round(red * 255), round(green * 255), round(blue * 255))
+
+
+def rgb_to_hsb(red, green, blue):
+    maximum = max(red, green, blue)
+    difference = maximum - min(red, green, blue)
+
+    return (0 if difference == 0 else
+            ((green - blue) / difference) % 6 / 6 if maximum == red else
+            ((blue - red) / difference + 2) / 6 if maximum == green else
+            ((red - green) / difference + 4) / 6,
+            difference / maximum if maximum != 0 else 0, maximum / 255)
+
+
+def color_luminance(red, green, blue, luminance):
+    return (round(min(max(red * (1 + luminance), 0),
+                      255)), round(min(max(green * (1 + luminance), 0), 255)),
+            round(min(max(blue * (1 + luminance), 0), 255)))
+
+
+def get_pixels_dominant_color(pixels):
+    total = 0
+    red_total = 0
+    green_total = 0
+    blue_total = 0
+
+    for offset in range(0, len(pixels), 4):
+        red = pixels[offset]
+        green = pixels[offset + 1]
+        blue = pixels[offset + 2]
+        alpha = pixels[offset + 3]
+
+        relevance = 6502.5 + 0.9 * alpha * (max(red, green, blue) -
+                                            min(red, green, blue))
+
+        red_total += red * relevance
+        green_total += green * relevance
+        blue_total += blue * relevance
+
+        total += relevance
+
+    total *= 255
+
+    red = red_total / total
+    green = green_total / total
+    blue = blue_total / total
+
+    (hue, saturation, brightness) = rgb_to_hsb(red * 255, green * 255,
+                                               blue * 255)
+
+    if saturation > 0.15:
+        saturation = 0.65
+    brightness = 0.90
+
+    return hsb_to_rgb(hue, saturation, brightness)
+
+
+def get_icon_dominant_color(icon):
+    icon_info = icon_theme.lookup_by_gicon(icon, APP_COLOR_ICON_SIZE,
+                                           Gtk.IconLookupFlags.FORCE_SIZE)
+    if icon_info is None:
+        return None
+
+    return get_pixels_dominant_color(icon_info.load_icon().get_pixels())
+
+
+def get_app_dominant_color(app):
+    if app is None:
+        return None
+
+    if app in app_color:
+        app_color[app] = app_color.pop(app)
+        return app_color[app]
+
+    app_info = Gio.DesktopAppInfo.new(app)
+    if app_info is None:
+        return None
+
+    icon = app_info.get_icon()
+    if icon is None:
+        return None
+
+    color = get_icon_dominant_color(icon)
+    if color is not None:
+        app_color[app] = color
+        if len(app_color) > APP_COLOR_MAX:
+            app_color.pop(list(app_color)[0])
+
+    return color
+
+
+def update_running_application(*_):
+
+    if current_state[1]:
+        apps = bus.call_sync("org.gnome.Shell.Introspect",
+                             "/org/gnome/Shell/Introspect",
+                             "org.gnome.Shell.Introspect",
+                             "GetRunningApplications", None,
+                             GLib.VariantType.new("(a{sa{sv}})"),
+                             Gio.DBusCallFlags.NONE, -1, None)[0]
+
+        if not apps:
+            led_bulbs.set_color(*APP_COLOR_NONE)
+            return
+
+        for app in apps:
+            app_info = apps[app]
+            if "active-on-seats" in app_info and "seat0" in app_info[
+                    "active-on-seats"]:
+                current_state[0] = get_app_dominant_color(app)
+                led_bulbs.set_color(*current_state[0])
+                return
+
+        app = list(apps)[0]
+        current_state[0] = get_app_dominant_color(app)
+        led_bulbs.set_color(*color_luminance(*current_state[0], -0.5))
+
+
+def update_display(*args):
+    properties = args[5]
+    if (properties[0] == "org.gnome.Mutter.DisplayConfig" and
+            "PowerSaveMode" in properties[1]):
+        mode = properties[1]["PowerSaveMode"]
+        if mode == 0:
+            led_bulbs.set_color(*color_luminance(*current_state[0], -0.5))
+            current_state[1] = True
+            return
+
+        if mode == 3:
+            led_bulbs.set_color(*APP_COLOR_NONE)
+            current_state[1] = False
+            return
+
+
+def update_off(*_):
+    led_bulbs.turn_off()
+    led_bulbs.close()
+    sys_exit(0)
+
+
+led_bulbs = WifiLedBulbs()
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+led_bulbs.turn_on()
+
+bus.signal_subscribe(None, "org.gnome.Shell.Introspect",
+                     "RunningApplicationsChanged",
+                     "/org/gnome/Shell/Introspect", None,
+                     Gio.DBusSignalFlags.NONE, update_running_application, None)
+bus.signal_subscribe(None, "org.gnome.ScreenSaver", "WakeUpScreen",
+                     "/org/gnome/ScreenSaver", None, Gio.DBusSignalFlags.NONE,
+                     update_running_application, None)
+
+bus.signal_subscribe(None, "org.freedesktop.DBus.Properties",
+                     "PropertiesChanged", "/org/gnome/Mutter/DisplayConfig",
+                     None, Gio.DBusSignalFlags.NONE, update_display, None)
+
+bus.signal_subscribe(None, "org.gnome.SessionManager.EndSessionDialog",
+                     "ConfirmedLogout",
+                     "/org/gnome/SessionManager/EndSessionDialog", None,
+                     Gio.DBusSignalFlags.NONE, update_off, None)
+bus.signal_subscribe(None, "org.gnome.SessionManager.EndSessionDialog",
+                     "ConfirmedReboot",
+                     "/org/gnome/SessionManager/EndSessionDialog", None,
+                     Gio.DBusSignalFlags.NONE, update_off, None)
+bus.signal_subscribe(None, "org.gnome.SessionManager.EndSessionDialog",
+                     "ConfirmedShutdown",
+                     "/org/gnome/SessionManager/EndSessionDialog", None,
+                     Gio.DBusSignalFlags.NONE, update_off, None)
+
+app_color = {}
+current_state = [APP_COLOR_NONE, True]
+icon_theme = Gtk.IconTheme.get_default()
+
+update_running_application()
+
+main = GLib.MainLoop.new(None, False)
+main.run()
