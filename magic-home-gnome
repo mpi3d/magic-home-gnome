@@ -46,12 +46,13 @@ class WifiLedBulbs:
         for bulb in self.bulbs:
             bulb.turnOff()
 
-    def set_color(self, red, gree, blue):
-        if (red, gree, blue) != self.current_color:
+    def set_color(self, red, green, blue):
+        if (red, green, blue) != self.current_color:
             for bulb in self.bulbs:
-                bulb.setRgb(red, gree, blue, False)
+                bulb.update_state()
+                bulb.setRgb(red, green, blue, persist=False)
 
-            self.current_color = (red, gree, blue)
+            self.current_color = (red, green, blue)
 
     def close(self):
         for bulb in self.bulbs:
